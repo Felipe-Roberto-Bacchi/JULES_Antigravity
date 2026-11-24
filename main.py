@@ -6,7 +6,7 @@ import sys
 
 from PySide6.QtWidgets import QApplication
 
-from jules_pet.pet_window import JulesPetWindow
+from jules_pet.swarm_manager import MascotSquadManager
 
 
 def main() -> int:
@@ -14,8 +14,10 @@ def main() -> int:
     app.setApplicationName("Jules Desktop Pet")
     app.setQuitOnLastWindowClosed(False)
 
-    pet = JulesPetWindow()
-    pet.show()
+    manager = MascotSquadManager()
+    app.aboutToQuit.connect(manager.stop)
+    manager.start()
+    manager.pet_window.show()
     return app.exec()
 
 

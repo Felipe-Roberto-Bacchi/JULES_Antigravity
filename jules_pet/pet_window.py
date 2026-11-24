@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from PySide6.QtCore import QPoint, QPointF, QRect, Qt, QTimer
+from PySide6.QtCore import QPoint, QPointF, QRect, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QAction,
     QActionGroup,
@@ -11,8 +11,10 @@ from PySide6.QtGui import (
     QCursor,
     QGuiApplication,
     QMouseEvent,
+    QMoveEvent,
     QPainter,
     QPaintEvent,
+    QResizeEvent,
 )
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon, QWidget
 
@@ -55,9 +57,14 @@ QMenu::separator {
 class JulesPetWindow(QWidget):
     """Frameless, always-on-top, transparent pixel-art Jules octopus pet."""
 
+    approval_bridge_toggled = Signal(bool)
+    click_through_toggled = Signal(bool)
+    moved = Signal()
+
     def __init__(self) -> None:
         super().__init__()
         self._always_on_top = True
+        self._click_through = False
         self._apply_window_flags()
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setMouseTracking(True)
@@ -96,6 +103,8 @@ class JulesPetWindow(QWidget):
         )
         if self._always_on_top:
             flags |= Qt.WindowType.WindowStaysOnTopHint
+        if self._click_through:
+            flags |= Qt.WindowType.WindowTransparentForInput
         self.setWindowFlags(flags)
 
     def _screen_rect(self) -> QRect:
@@ -146,6 +155,18 @@ class JulesPetWindow(QWidget):
         self._act_top.setChecked(self._always_on_top)
         self._act_top.toggled.connect(self._on_toggle_top)
         self._menu.addAction(self._act_top)
+
+        self._menu.addSeparator()
+
+        self._act_approval_bridge = QAction("Aprovação pelo Pet", self, checkable=True)
+        self._act_approval_bridge.setChecked(False)
+        self._act_approval_bridge.toggled.connect(self.approval_bridge_toggled.emit)
+        self._menu.addAction(self._act_approval_bridge)
+
+        self._act_click_through = QAction("Modo Click-Through (Ctrl+Shift+J)", self, checkable=True)
+        self._act_click_through.setChecked(False)
+        self._act_click_through.toggled.connect(self.click_through_toggled.emit)
+        self._menu.addAction(self._act_click_through)
 
         self._menu.addSeparator()
 
@@ -270,6 +291,53 @@ class JulesPetWindow(QWidget):
             painter.fillRect(px, py, s * 3, s, color)
             painter.fillRect(px + s, py + s, s, s, color)
             painter.fillRect(px, py + s * 2, s * 3, s, color)
+        elif p.kind == "sweat":
+            # Crisp pixel teardrop
+            painter.fillRect(px, py - s, s, s, color)
+            painter.fillRect(px - s // 2, py, s * 2, s * 2, color)
+        elif p.kind == "ink":
+            # Crisp pixel ink splat with satellite droplets
+            painter.fillRect(px - s, py - s, s * 2, s * 2, color)
+            painter.fillRect(px - 2 * s, py, s, s, color)
+            painter.fillRect(px + s, py - 2 * s, s, s, color)
+            painter.fillRect(px + s, py + s, s, s, color)
+
+    def pet_rect(self) -> QRect:
+        """Return the pet window bounds in screen coordinates."""
+        return QRect(self.x(), self.y(), self.width(), self.height())
+
+    def screen_rect(self) -> QRect:
+        """Return the available screen geometry containing Jules."""
+        return self._screen_rect()
+
+    def set_click_through(self, enabled: bool) -> None:
+        """Enable or disable input pass-through on the main pet window."""
+        self._click_through = bool(enabled)
+        was_visible = self.isVisible()
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, self._click_through)
+        self._apply_window_flags()
+        if was_visible:
+            self.show()
+
+    def set_click_through_checked(self, enabled: bool) -> None:
+        """Sync the menu check state for click-through without re-emitting toggled."""
+        self._act_click_through.blockSignals(True)
+        self._act_click_through.setChecked(bool(enabled))
+        self._act_click_through.blockSignals(False)
+
+    def set_approval_bridge_checked(self, enabled: bool) -> None:
+        """Sync the menu check state for approval bridge without re-emitting toggled."""
+        self._act_approval_bridge.blockSignals(True)
+        self._act_approval_bridge.setChecked(bool(enabled))
+        self._act_approval_bridge.blockSignals(False)
+
+    def moveEvent(self, event: QMoveEvent) -> None:  # noqa: N802
+        super().moveEvent(event)
+        self.moved.emit()
+
+    def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self.moved.emit()
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
