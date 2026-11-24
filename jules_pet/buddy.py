@@ -103,10 +103,19 @@ class BuddySessionModel(QObject):
         self.active_category: str = ""
         self.input_tokens: int = 0
         self.cache_read_tokens: int = 0
+        self.total_tokens: int = 0
         self.last_error: str = ""
+
+        self.session_duration_seconds: float = 0.0
+        self.total_subagents: int = 0
+        self.commands_succeeded: int = 0
+        self.commands_total: int = 0
+        self.pet_count: int = 0
+        self.is_exhausted: bool = False
 
         self._verb_cursor: int = 0
         self._pending_ink_shock: bool = False
+        self._coffee_reset_duration: float = 0.0
 
     @property
     def is_sweating(self) -> bool:
@@ -123,7 +132,7 @@ class BuddySessionModel(QObject):
             self.mood = "shocked"
         elif self.is_sweating:
             self.mood = "sweating"
-        elif self.energy <= 25.0:
+        elif self.is_exhausted or self.energy <= 25.0:
             self.mood = "tired"
         elif self.mood_score >= 85.0:
             self.mood = "happy"
@@ -131,6 +140,13 @@ class BuddySessionModel(QObject):
             self.mood = "focused"
         else:
             self.mood = "idle"
+
+    def _update_exhaustion(self) -> None:
+        since_coffee = self.session_duration_seconds - self._coffee_reset_duration
+        if self.energy < 20.0 or since_coffee >= 10800.0:
+            self.is_exhausted = True
+            self.status_verb = "Turno da madrugada... só mais 5 minutinhos..."
+            self.mood = "tired"
 
     def handle_event(self, event: dict[str, Any]) -> None:
         """Process an IPC event dict (`tool_start`, `tool_end`, `lifecycle`, `approval_*`)."""
@@ -173,6 +189,9 @@ class BuddySessionModel(QObject):
     def _handle_tool_end(self, event: dict[str, Any]) -> None:
         error_text = str(event.get("error") or "").strip()
         ok = bool(event.get("ok", not bool(error_text)))
+        self.commands_total += 1
+        if ok:
+            self.commands_succeeded += 1
 
         if not ok:
             self.phase = "error"
@@ -277,13 +296,20 @@ class BuddySessionModel(QObject):
         """Update token metrics and context pressure ratio (0.0..1.0)."""
         self.input_tokens = max(0, int(input_tokens))
         self.cache_read_tokens = max(0, int(cache_read_tokens))
+        self.total_tokens = self.input_tokens + self.cache_read_tokens
         self.context_pressure = _clamp(pressure_ratio, 0.0, 1.0)
         self._refresh_mood_label()
         self.context_pressure_changed.emit(self.context_pressure, self.is_sweating)
         self.state_changed.emit()
 
+    def record_subagent_spawn(self) -> None:
+        """Increment total spawned subagents counter for the session."""
+        self.total_subagents += 1
+        self.state_changed.emit()
+
     def on_pet(self) -> None:
         """Boost mood and energy when the user pets Jules."""
+        self.pet_count += 1
         self.mood_score = _clamp(self.mood_score + 10.0, 0.0, 100.0)
         self.energy = _clamp(self.energy + 8.0, 0.0, 100.0)
         if self.phase == "error":
@@ -295,16 +321,32 @@ class BuddySessionModel(QObject):
             self.status_verb = "Hehe, faz cócegas nos tentáculos!"
         self.state_changed.emit()
 
+    def take_coffee_break(self) -> None:
+        """Boost energy & mood, clear exhaustion, and set a happy status verb."""
+        self.energy = _clamp(self.energy + 30.0, 0.0, 100.0)
+        self.mood_score = _clamp(self.mood_score + 20.0, 0.0, 100.0)
+        self.is_exhausted = False
+        self._coffee_reset_duration = self.session_duration_seconds
+        if self.phase == "error":
+            self.phase = "idle"
+            self.last_error = ""
+        self.eye_mode = "happy"
+        self.mood = "happy"
+        self.status_verb = "Cafezinho reforçado! Energia lá em cima!"
+        self.state_changed.emit()
+
     def tick(self, dt: float) -> None:
-        """Advance passive energy drain during work or recovery while idle."""
+        """Advance session timer, passive energy drain/recovery, and exhaustion state."""
         dt = max(0.0, float(dt))
         if dt == 0.0:
             return
+        self.session_duration_seconds += dt
         if self.phase in ("working", "thinking"):
             self.energy = _clamp(self.energy - 0.5 * dt, 0.0, 100.0)
         elif self.phase in ("idle", "done"):
             self.energy = _clamp(self.energy + 1.2 * dt, 0.0, 100.0)
         self._refresh_mood_label()
+        self._update_exhaustion()
 
     def apply_to_controller(self, controller: PetController) -> None:
         """Synchronize buddy expressions, ink shocks, and context sweat onto PetController."""
@@ -313,6 +355,11 @@ class BuddySessionModel(QObject):
             self._pending_ink_shock = False
             controller.trigger_ink_shock()
             return
+        if self.is_exhausted:
+            controller.set_exhausted(True)
+            return
+        if controller.state.name == "EXHAUSTED":
+            controller.set_exhausted(False)
         if self.phase in ("idle", "done") and self.eye_mode == "normal":
             controller.set_ai_activity(None)
         else:

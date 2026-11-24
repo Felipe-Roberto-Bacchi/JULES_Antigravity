@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import random
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum, auto
 
@@ -16,6 +17,7 @@ from jules_pet.config import (
     GRID_HEIGHT,
     GRID_WIDTH,
     HEART_PINK,
+    OUTLINE,
     PADDING_X,
     PADDING_Y,
     ROAM_SPEED,
@@ -36,6 +38,9 @@ class PetState(Enum):
     DRAGGED = auto()
     HAPPY = auto()
     SLEEP = auto()
+    COFFEE_BREAK = auto()
+    EXHAUSTED = auto()
+    PERCHED = auto()
 
 
 @dataclass
@@ -46,7 +51,7 @@ class Particle:
     y: float
     vx: float
     vy: float
-    kind: str  # "sparkle" | "heart" | "zzz" | "sweat" | "ink"
+    kind: str  # "sparkle" | "heart" | "zzz" | "sweat" | "ink" | "steam"
     color: str
     life: float
     max_life: float
@@ -88,6 +93,12 @@ class PetController:
 
     _roam_target_x: float | None = None
     _roam_target_y: float | None = None
+    _perch_rect: QRect | None = None
+    _last_screen_rect: QRect | None = None
+    _coffee_target: QPointF | None = None
+    _coffee_on_arrived: Callable[[], None] | None = None
+    _coffee_sipping: bool = False
+    _coffee_sip_timer: float = 0.0
     particles: list[Particle] = field(default_factory=list)
 
     @property
@@ -115,6 +126,7 @@ class PetController:
 
     def set_scale(self, new_scale: int, screen_rect: QRect) -> None:
         """Update pixel scale while keeping the sprite center stable."""
+        self._last_screen_rect = QRect(screen_rect)
         center = self.sprite_center
         self.scale = new_scale
         self.x = center.x() - PADDING_X - self.sprite_width / 2.0
@@ -123,6 +135,7 @@ class PetController:
 
     def center_on(self, screen_rect: QRect) -> None:
         """Center Jules in the given screen rectangle."""
+        self._last_screen_rect = QRect(screen_rect)
         self.x = screen_rect.center().x() - self.window_width / 2.0
         self.y = screen_rect.center().y() - self.window_height / 2.0
         self.vx = 0.0
@@ -143,12 +156,97 @@ class PetController:
 
     def set_floor_mode(self, enabled: bool, screen_rect: QRect) -> None:
         """Switch between free-floating mode and taskbar floor-walking mode."""
+        self._last_screen_rect = QRect(screen_rect)
         self.floor_mode = enabled
         if self.state in (PetState.ROAM, PetState.WALK_FLOOR, PetState.IDLE):
             self.state = PetState.WALK_FLOOR if enabled else PetState.IDLE
             self.state_timer = 2.0
             if enabled:
                 self.y = float(self._max_y(screen_rect))
+
+    def start_coffee_break(
+        self,
+        cup_center: QPointF,
+        on_arrived: Callable[[], None] | None = None,
+    ) -> None:
+        """Steer Jules toward the coffee cup, sip with steam & hearts, then return to IDLE."""
+        self.state = PetState.COFFEE_BREAK
+        self._coffee_target = QPointF(cup_center)
+        self._coffee_on_arrived = on_arrived
+        self._coffee_sipping = False
+        self._coffee_sip_timer = 0.0
+        self._roam_target_x = None
+        self._roam_target_y = None
+
+    def set_perch_rect(self, rect: QRect | None, screen_rect: QRect | None = None) -> None:
+        """Perch Jules neatly on top of `rect`, or return to IDLE when `rect` is None."""
+        if screen_rect is not None:
+            self._last_screen_rect = QRect(screen_rect)
+        if rect is None:
+            self._perch_rect = None
+            if self.state == PetState.PERCHED:
+                self.state = PetState.IDLE
+                self.state_timer = 2.0
+            return
+
+        self._perch_rect = QRect(rect)
+        self.state = PetState.PERCHED
+        self.vx = 0.0
+        self.vy = 0.0
+        self._roam_target_x = None
+        self._roam_target_y = None
+        self._position_on_perch(self._last_screen_rect)
+
+    def _position_on_perch(self, screen_rect: QRect | None) -> None:
+        if self._perch_rect is None:
+            return
+        self.x = float(self._perch_rect.center().x() - self.window_width / 2.0)
+        self.y = float(self._perch_rect.top() - PADDING_Y - self.sprite_height)
+        if screen_rect is not None:
+            self._clamp_to_screen(screen_rect)
+
+    def set_exhausted(self, enabled: bool) -> None:
+        """Enter or exit the exhausted burnout state with sleepy eyes and slow zzz."""
+        if enabled:
+            self.state = PetState.EXHAUSTED
+            self.vx = 0.0
+            self.vy = 0.0
+            self.sleep_zzz_timer = 0.35
+        elif self.state == PetState.EXHAUSTED:
+            self.state = PetState.IDLE
+            self.state_timer = 2.0
+
+    def _emit_coffee_sip_particles(self) -> None:
+        cx = self.window_width / 2.0
+        cy = PADDING_Y + self.sprite_height * 0.25
+        for i in range(3):
+            self.particles.append(
+                Particle(
+                    x=cx + (i - 1) * 8.0,
+                    y=cy,
+                    vx=random.uniform(-6.0, 6.0),
+                    vy=-random.uniform(22.0, 34.0),
+                    kind="steam",
+                    color=OUTLINE,
+                    life=0.95,
+                    max_life=0.95,
+                    size=max(3, self.scale),
+                )
+            )
+        for i in range(2):
+            self.particles.append(
+                Particle(
+                    x=cx + (-10.0 if i == 0 else 10.0),
+                    y=cy - 4.0,
+                    vx=(-10.0 if i == 0 else 10.0),
+                    vy=-28.0,
+                    kind="heart",
+                    color=HEART_PINK,
+                    life=0.95,
+                    max_life=0.95,
+                    size=max(3, self.scale),
+                )
+            )
 
     def start_drag(self) -> None:
         """Enter dragged state."""
@@ -160,6 +258,7 @@ class PetController:
 
     def update_drag(self, dx: float, dy: float, screen_rect: QRect) -> None:
         """Move pet during active mouse drag."""
+        self._last_screen_rect = QRect(screen_rect)
         self.x += dx
         self.y += dy
         self._clamp_to_screen(screen_rect)
@@ -355,6 +454,7 @@ class PetController:
 
     def update(self, dt: float, screen_rect: QRect, cursor_pos: QPointF) -> None:
         """Advance animation, movement, eye tracking, and particles by dt seconds."""
+        self._last_screen_rect = QRect(screen_rect)
         dt = max(0.001, min(dt, 0.05))
         self.anim_time += dt
         self.bob_phase += dt * 3.2
@@ -408,6 +508,27 @@ class PetController:
                         size=max(3, self.scale),
                     )
                 )
+        elif self.state == PetState.EXHAUSTED:
+            self.sleep_zzz_timer -= dt
+            if self.sleep_zzz_timer <= 0.0:
+                self.sleep_zzz_timer = 2.0
+                self.particles.append(
+                    Particle(
+                        x=self.window_width * 0.65,
+                        y=PADDING_Y + 10.0,
+                        vx=6.0,
+                        vy=-14.0,
+                        kind="zzz",
+                        color=ZZZ_LAVENDER,
+                        life=1.6,
+                        max_life=1.6,
+                        size=max(3, self.scale),
+                    )
+                )
+        elif self.state == PetState.COFFEE_BREAK:
+            self._update_coffee_break(dt, screen_rect)
+        elif self.state == PetState.PERCHED:
+            self._position_on_perch(screen_rect)
         elif self.follow_mouse:
             self.state = PetState.FOLLOW_MOUSE
             self._steer_toward(cursor_pos.x(), cursor_pos.y(), FOLLOW_SPEED, FOLLOW_STOP_RADIUS)
@@ -415,13 +536,51 @@ class PetController:
         else:
             self._update_autonomous(dt, screen_rect)
 
-        if self.context_pressure >= 0.75 and self.state != PetState.SLEEP:
+        if self.context_pressure >= 0.75 and self.state not in (PetState.SLEEP, PetState.EXHAUSTED):
             self.sweat_timer -= dt
             if self.sweat_timer <= 0.0:
                 self._emit_sweat_particle()
                 self.sweat_timer = 0.45 if self.context_pressure >= 0.9 else 0.65
 
         self._update_particles(dt)
+
+    def _update_coffee_break(self, dt: float, screen_rect: QRect) -> None:
+        if self._coffee_sipping:
+            self.vx *= 0.8
+            self.vy *= 0.8
+            self._coffee_sip_timer -= dt
+            if self._coffee_sip_timer <= 0.0:
+                self._coffee_sipping = False
+                self._coffee_target = None
+                self.state = PetState.IDLE
+                self.state_timer = 2.0
+            return
+
+        if self._coffee_target is None:
+            self.state = PetState.IDLE
+            self.state_timer = 2.0
+            return
+
+        min_cx = self._min_x(screen_rect) + PADDING_X + self.sprite_width / 2.0
+        max_cx = self._max_x(screen_rect) + PADDING_X + self.sprite_width / 2.0
+        min_cy = self._min_y(screen_rect) + PADDING_Y + self.sprite_height / 2.0
+        max_cy = self._max_y(screen_rect) + PADDING_Y + self.sprite_height / 2.0
+        target_cx = max(min_cx, min(max_cx, self._coffee_target.x()))
+        target_cy = max(min_cy, min(max_cy, self._coffee_target.y()))
+
+        arrived = self._steer_toward(target_cx, target_cy, max(FOLLOW_SPEED, 5.5), 24.0)
+        self._apply_velocity(dt, screen_rect, damping=0.88)
+        if arrived:
+            self._coffee_sipping = True
+            self._coffee_sip_timer = 0.5
+            self.vx = 0.0
+            self.vy = 0.0
+            self.happy_timer = max(self.happy_timer, 0.8)
+            self._emit_coffee_sip_particles()
+            if self._coffee_on_arrived is not None:
+                callback = self._coffee_on_arrived
+                self._coffee_on_arrived = None
+                callback()
 
     def _update_autonomous(self, dt: float, screen_rect: QRect) -> None:
         self.state_timer -= dt
@@ -581,7 +740,7 @@ class PetController:
 
     def current_frame_name(self) -> str:
         """Select the tentacle animation frame matching the current state."""
-        if self.state == PetState.SLEEP:
+        if self.state in (PetState.SLEEP, PetState.EXHAUSTED):
             return "sleep_0"
         if self.state == PetState.DRAGGED:
             idx = int(self.anim_time * 6.0) % 2
@@ -589,7 +748,11 @@ class PetController:
         if self._ai_frame_prefix in ("coding", "high_five", "walk"):
             idx = int(self.anim_time * 6.0) % 2
             return f"{self._ai_frame_prefix}_{idx}"
-        if self.state == PetState.WALK_FLOOR and abs(self.vx) > 0.2:
+        if (
+            self.state in (PetState.WALK_FLOOR, PetState.COFFEE_BREAK)
+            and not self._coffee_sipping
+            and abs(self.vx) > 0.2
+        ):
             idx = int(self.anim_time * 6.0) % 2
             return f"walk_{idx}"
         idx = int(self.anim_time * 4.5) % 4
@@ -597,7 +760,7 @@ class PetController:
 
     def current_eye_mode(self) -> str:
         """Select the eye expression matching the current state."""
-        if self.state == PetState.SLEEP:
+        if self.state in (PetState.SLEEP, PetState.EXHAUSTED):
             return "sleep"
         if self.state == PetState.DRAGGED:
             return "surprised"
@@ -613,7 +776,7 @@ class PetController:
 
     def bob_offset_y(self) -> int:
         """Subtle vertical floating offset in screen pixels."""
-        if self.state in (PetState.DRAGGED, PetState.SLEEP):
+        if self.state in (PetState.DRAGGED, PetState.SLEEP, PetState.EXHAUSTED, PetState.PERCHED):
             return 0
         if self.state == PetState.WALK_FLOOR:
             return -abs(int(round(math.sin(self.bob_phase * 2.0) * 2.0)))
