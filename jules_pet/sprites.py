@@ -71,40 +71,40 @@ TENTACLE_FRAMES: dict[str, tuple[str, ...]] = {
         ".OBBO..OBBO..OBBO..OBBO.",  # 15
         ".OBO...OBBO..OBBO...OBO.",  # 16
         "OSSO...OBBO..OBBO...OSSO",  # 17
-        "OOO....OSSO..OSSO....OOO",  # 18
-        ".......OOO....OOO.......",  # 19
+        "OOSS...OSSO..OSSO...SSOO",  # 18
+        ".OOO...OOO....OOO...OOO.",  # 19
         "........................",  # 20
         "........................",  # 21
     ),
     "idle_1": (
         "..OBBSSBBBBBBBBBBSSBBO..",  # 13
-        "..OBBOOBBBBOOBBBBOOBBO..",  # 14
-        ".OBBO..OBBO..OBBO..OBBO.",  # 15
-        "OSSO...OBBO..OBBO...OSSO",  # 16
-        "OOO....OSSO..OSSO....OOO",  # 17
-        ".......OOO....OOO.......",  # 18
-        "........................",  # 19
+        "...OBBOOBBBOOBBBOOBBO...",  # 14
+        "...OBO..OBBOOBBO..OBO...",  # 15
+        "...OBO..OBBOOBBO..OBO...",  # 16
+        "...OSSO.OBBOOBBO.OSSO...",  # 17
+        "....OOO.OSSOOSSO.OOO....",  # 18
+        "........OOO..OOO........",  # 19
         "........................",  # 20
         "........................",  # 21
     ),
     "idle_2": (
         "..OBBSSBBBBBBBBBBSSBBO..",  # 13
-        "..OBBOOBBBBOOBBBBOOBBO..",  # 14
-        ".OBBO..OBBO..OBBO..OBBO.",  # 15
-        ".OBO...OBO....OBO...OBO.",  # 16
-        ".OSSO..OBBO..OBBO..OSSO.",  # 17
-        "..OOO..OSSO..OSSO..OOO..",  # 18
-        ".......OOO....OOO.......",  # 19
-        "........................",  # 20
+        "...OOBBOBBBOOBBBOBBOO...",  # 14
+        "....OBBOOBBOOBBOOBBO....",  # 15
+        "....OBO.OBBOOBBO.OBO....",  # 16
+        "....OBO.OBBOOBBO.OBO....",  # 17
+        ".....OBOOBBOOBBOOBO.....",  # 18
+        ".....OSSOSSOOSSOSSO.....",  # 19
+        "......OOO.OOOO.OOO......",  # 20
         "........................",  # 21
     ),
     "idle_3": (
         "..OBBSSBBBBBBBBBBSSBBO..",  # 13
         "..OBBOOBBBBOOBBBBOOBBO..",  # 14
-        "..OBO..OBBO..OBBO..OBO..",  # 15
-        ".OBBO..OSSO..OSSO..OBBO.",  # 16
-        ".OSSO..OOO....OOO..OSSO.",  # 17
-        "..OOO...............OOO.",  # 18
+        ".OBBO..OBBO..OBBO..OBBO.",  # 15
+        "OSSO...OBBO..OBBO...OSSO",  # 16
+        "OOSS...OSSO..OSSO...SSOO",  # 17
+        ".OOO...OOO....OOO...OOO.",  # 18
         "........................",  # 19
         "........................",  # 20
         "........................",  # 21

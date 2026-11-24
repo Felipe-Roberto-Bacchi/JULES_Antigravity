@@ -160,3 +160,33 @@ def test_hue_quantization_and_flip_x(qapp: QApplication) -> None:
     img_flipped = get_sprite_pixmap("idle_0", "normal", scale=1, flip_x=True).toImage()
     assert img_normal.pixelColor(7, 2).rgb() == img_flipped.pixelColor(24 - 1 - 7, 2).rgb()
     assert img_normal.pixelColor(7, 2).rgb() != img_normal.pixelColor(24 - 1 - 7, 2).rgb()
+
+
+def _row_span(img, row: int) -> int:
+    xs = [x for x in range(img.width()) if img.pixelColor(x, row).alpha() > 0]
+    if not xs:
+        return 0
+    return max(xs) - min(xs) + 1
+
+
+def test_idle_squeeze_and_flare_hydrodynamic_cycle(qapp: QApplication) -> None:
+    imgs = {
+        name: get_sprite_pixmap(name, eye_mode="normal", scale=1).toImage()
+        for name in ("idle_0", "idle_1", "idle_2", "idle_3")
+    }
+
+    # idle_0 (Repouso / Planando): flared out to edges with 4 distinct tentacles
+    assert _row_span(imgs["idle_0"], 17) >= 22
+    assert _count_opaque_segments(imgs["idle_0"], 17) == 4
+
+    # idle_1 (Contração / Squeeze): narrower than idle_0
+    assert _row_span(imgs["idle_1"], 17) < _row_span(imgs["idle_0"], 17)
+
+    # idle_2 (Propulsão): even narrower at row 18 and stretches down to row 20
+    assert _row_span(imgs["idle_2"], 18) < _row_span(imgs["idle_1"], 18)
+    assert _row_span(imgs["idle_2"], 20) > 0
+
+    # idle_3 (Abertura / Flare): opens wide again with 4 distinct tentacles
+    assert _row_span(imgs["idle_3"], 17) > _row_span(imgs["idle_2"], 17)
+    assert _row_span(imgs["idle_3"], 17) >= 22
+    assert _count_opaque_segments(imgs["idle_3"], 17) == 4
