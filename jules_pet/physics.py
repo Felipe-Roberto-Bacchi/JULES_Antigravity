@@ -10,6 +10,7 @@ from enum import Enum, auto
 from PySide6.QtCore import QPointF, QRect
 
 from jules_pet.config import (
+    EYE,
     FOLLOW_SPEED,
     FOLLOW_STOP_RADIUS,
     GRID_HEIGHT,
@@ -45,7 +46,7 @@ class Particle:
     y: float
     vx: float
     vy: float
-    kind: str  # "sparkle" | "heart" | "zzz"
+    kind: str  # "sparkle" | "heart" | "zzz" | "sweat" | "ink"
     color: str
     life: float
     max_life: float
@@ -74,9 +75,16 @@ class PetController:
     happy_timer: float = 0.0
     sleep_zzz_timer: float = 0.0
     pet_cooldown: float = 0.0
+    context_pressure: float = 0.0
+    sweat_timer: float = 0.0
 
     eye_dx: int = 0
     eye_dy: int = 0
+
+    _ai_eye_mode: str | None = None
+    _ai_frame_prefix: str | None = None
+    _ai_timer: float = 0.0
+    _ai_timed: bool = False
 
     _roam_target_x: float | None = None
     _roam_target_y: float | None = None
@@ -237,6 +245,114 @@ class PetController:
             )
         )
 
+    def set_ai_activity(
+        self,
+        eye_mode: str | None,
+        frame_prefix: str | None = None,
+        duration: float = 0.0,
+    ) -> None:
+        """Apply or clear an AI-driven expression and tentacle frame override."""
+        if eye_mode is None:
+            self._ai_eye_mode = None
+            self._ai_frame_prefix = None
+            self._ai_timer = 0.0
+            self._ai_timed = False
+            return
+        self._ai_eye_mode = eye_mode
+        self._ai_frame_prefix = frame_prefix
+        self._ai_timer = max(0.0, float(duration))
+        self._ai_timed = duration > 0.0
+
+    def set_context_pressure(self, pressure: float) -> None:
+        """Update normalized context window pressure (0.0..1.0) for sweat/ink effects."""
+        self.context_pressure = max(0.0, min(1.0, float(pressure)))
+
+    def trigger_ink_shock(self, duration: float = 1.2) -> None:
+        """Startled ink burst reaction when a tool fails."""
+        if self.state == PetState.SLEEP:
+            self.state = PetState.IDLE
+        self.happy_timer = 0.0
+        self.set_ai_activity("shocked_ink", None, duration=duration)
+        self.vy = min(self.vy, -3.0)
+        cx = self.window_width / 2.0
+        cy = PADDING_Y + self.sprite_height * 0.45
+        for i in range(6):
+            angle = math.pi * (i / 5.0) * -1.0 + random.uniform(-0.25, 0.25)
+            speed = random.uniform(35.0, 75.0)
+            self.particles.append(
+                Particle(
+                    x=cx + random.uniform(-10, 10),
+                    y=cy,
+                    vx=math.cos(angle) * speed,
+                    vy=math.sin(angle) * speed - 10.0,
+                    kind="ink",
+                    color=EYE,
+                    life=0.75,
+                    max_life=0.75,
+                    size=max(3, self.scale),
+                )
+            )
+
+    def trigger_high_five(self, duration: float = 1.0) -> None:
+        """Visual-only celebratory high-five tentacle pose with sparkles and hearts."""
+        if self.state == PetState.SLEEP:
+            self.state = PetState.IDLE
+        self.set_ai_activity("high_five", "high_five", duration=duration)
+        self.vy = min(self.vy, -4.0)
+        cx = self.window_width / 2.0
+        cy = PADDING_Y + self.sprite_height * 0.2
+        for i in range(5):
+            angle = -math.pi * (0.15 + 0.175 * i)
+            speed = random.uniform(30.0, 65.0)
+            is_heart = i % 2 == 1
+            self.particles.append(
+                Particle(
+                    x=cx + random.uniform(-8, 8),
+                    y=cy,
+                    vx=math.cos(angle) * speed,
+                    vy=math.sin(angle) * speed - 16.0,
+                    kind="heart" if is_heart else "sparkle",
+                    color=HEART_PINK if is_heart else SPARKLE_YELLOW,
+                    life=0.8,
+                    max_life=0.8,
+                    size=max(3, self.scale),
+                )
+            )
+
+    def set_annoyed(self, duration: float = 1.8) -> None:
+        """Show annoyed side-eye expression when swarm clones appear."""
+        self.set_ai_activity("annoyed_side_eye", None, duration=duration)
+
+    def _emit_sweat_particle(self) -> None:
+        side = 1.0 if random.random() >= 0.5 else -1.0
+        self.particles.append(
+            Particle(
+                x=self.window_width / 2.0 + side * (self.sprite_width * 0.36),
+                y=PADDING_Y + 8.0,
+                vx=side * random.uniform(10.0, 22.0),
+                vy=random.uniform(8.0, 18.0),
+                kind="sweat",
+                color=SPARKLE_CYAN,
+                life=0.75,
+                max_life=0.75,
+                size=max(3, self.scale),
+            )
+        )
+        if self.context_pressure >= 0.9:
+            self.particles.append(
+                Particle(
+                    x=self.window_width / 2.0 + random.uniform(-8.0, 8.0),
+                    y=PADDING_Y + self.sprite_height * 0.4,
+                    vx=random.uniform(-18.0, 18.0),
+                    vy=random.uniform(-22.0, -8.0),
+                    kind="ink",
+                    color=EYE,
+                    life=0.6,
+                    max_life=0.6,
+                    size=max(3, self.scale),
+                )
+            )
+
     def update(self, dt: float, screen_rect: QRect, cursor_pos: QPointF) -> None:
         """Advance animation, movement, eye tracking, and particles by dt seconds."""
         dt = max(0.001, min(dt, 0.05))
@@ -246,6 +362,10 @@ class PetController:
             self.pet_cooldown = max(0.0, self.pet_cooldown - dt)
         if self.happy_timer > 0.0:
             self.happy_timer = max(0.0, self.happy_timer - dt)
+        if self._ai_timed:
+            self._ai_timer = max(0.0, self._ai_timer - dt)
+            if self._ai_timer <= 0.0:
+                self.set_ai_activity(None)
 
         # Natural blinking
         if self.blink_duration > 0.0:
@@ -294,6 +414,12 @@ class PetController:
             self._apply_velocity(dt, screen_rect, damping=0.88)
         else:
             self._update_autonomous(dt, screen_rect)
+
+        if self.context_pressure >= 0.75 and self.state != PetState.SLEEP:
+            self.sweat_timer -= dt
+            if self.sweat_timer <= 0.0:
+                self._emit_sweat_particle()
+                self.sweat_timer = 0.45 if self.context_pressure >= 0.9 else 0.65
 
         self._update_particles(dt)
 
@@ -448,6 +574,8 @@ class PetController:
                 p.y += p.vy * dt
                 if p.kind == "sparkle":
                     p.vy += 45.0 * dt
+                elif p.kind in ("sweat", "ink"):
+                    p.vy += 55.0 * dt
                 alive.append(p)
         self.particles = alive
 
@@ -458,6 +586,9 @@ class PetController:
         if self.state == PetState.DRAGGED:
             idx = int(self.anim_time * 6.0) % 2
             return f"drag_{idx}"
+        if self._ai_frame_prefix in ("coding", "high_five", "walk"):
+            idx = int(self.anim_time * 6.0) % 2
+            return f"{self._ai_frame_prefix}_{idx}"
         if self.state == PetState.WALK_FLOOR and abs(self.vx) > 0.2:
             idx = int(self.anim_time * 6.0) % 2
             return f"walk_{idx}"
@@ -470,8 +601,12 @@ class PetController:
             return "sleep"
         if self.state == PetState.DRAGGED:
             return "surprised"
+        if self._ai_timed and self._ai_eye_mode is not None:
+            return self._ai_eye_mode
         if self.happy_timer > 0.0:
             return "happy"
+        if self._ai_eye_mode is not None:
+            return self._ai_eye_mode
         if self.blink_duration > 0.0:
             return "blink"
         return "normal"
