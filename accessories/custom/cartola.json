@@ -1,0 +1,23 @@
+{
+  "name": "Cartola Clássica",
+  "anchor": "head_top",
+  "offset_x": 0,
+  "offset_y": 1,
+  "scale_with_pet": true,
+  "palette": {
+    "O": "#0B0A14",
+    "B": "#1E1B2E",
+    "H": "#3B3556",
+    "R": "#DC2626",
+    "Y": "#FACC15"
+  },
+  "rows": [
+    "...OOOOOOOOOO...",
+    "...OOHHBBBBBO...",
+    "...OOHHBBBBBO...",
+    "...OOHHBBBBBO...",
+    "...OORRYRRRRO...",
+    ".OOBBBBBBBBBBOO.",
+    "OOOOOOOOOOOOOOOO"
+  ]
+}

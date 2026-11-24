@@ -1,0 +1,23 @@
+{
+  "name": "Monóculo Dourado",
+  "anchor": "eyes",
+  "offset_x": 5,
+  "offset_y": 2,
+  "scale_with_pet": true,
+  "palette": {
+    "G": "#FACC15",
+    "D": "#D97706",
+    "C": "#38BDF866",
+    "L": "#E0F2FEAA"
+  },
+  "rows": [
+    ".GG...",
+    "GLCG..",
+    "GCCG..",
+    "GCCGG.",
+    ".GG.G.",
+    "....GD",
+    ".....G",
+    "....G."
+  ]
+}

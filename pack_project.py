@@ -39,8 +39,10 @@ IGNORE_FILES = {
     "tests/test_hook_bridge.py",
     "tests/test_ipc.py",
     "tests/test_pet.py",
+    "tests/test_settings.py",
     "tests/test_sprites.py",
     "tests/test_swarm.py",
+    
 }
 
 BINARY_EXTENSIONS = {
