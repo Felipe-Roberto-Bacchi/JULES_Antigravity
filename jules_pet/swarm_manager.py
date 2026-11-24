@@ -8,7 +8,7 @@ from PySide6.QtCore import QObject, Qt, QTimer
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import QWidget
 
-from jules_pet.bubble_widget import BubbleWidget
+from jules_pet.bubble_widget import BubbleWidget, DONE_HIDE_MS, IDLE_HIDE_MS
 from jules_pet.buddy import BuddySessionModel
 from jules_pet.ipc_protocol import DEFAULT_IPC_HOST, DEFAULT_IPC_PORT
 from jules_pet.ipc_server import JulesIpcServer
@@ -69,8 +69,11 @@ class MascotSquadManager(QObject):
         self.transcript_watcher = transcript_watcher or TranscriptWatcher(parent=self)
         self.buddy = buddy or BuddySessionModel(parent=self)
 
-        self.approval_bridge_enabled: bool = False
-        self.click_through: bool = False
+        self.approval_bridge_enabled: bool = self.pet_window.settings.approval_bridge_enabled
+        self.click_through: bool = self.pet_window.settings.click_through
+        self.bubble_widget.set_auto_hide_enabled(self.pet_window.settings.auto_hide_bubble)
+        if self.click_through:
+            _apply_click_through(self.bubble_widget, True)
         self.active_clones: dict[str, JulesSubagentWindow] = {}
         self._overflow_subagents: dict[str, tuple[str, str]] = {}
         self._orbit_counter: int = 0
@@ -83,7 +86,9 @@ class MascotSquadManager(QObject):
 
         # Wire pet window menu & geometry signals
         self.pet_window.approval_bridge_toggled.connect(self.set_approval_bridge_enabled)
+        self.pet_window.auto_hide_bubble_toggled.connect(self.set_auto_hide_bubble)
         self.pet_window.click_through_toggled.connect(self.set_click_through)
+        self.pet_window.user_interacted.connect(self._on_user_interacted)
         self.pet_window.moved.connect(self._on_pet_moved)
 
         # Wire bubble approval decisions back to IPC server
@@ -121,7 +126,7 @@ class MascotSquadManager(QObject):
         self._transcript_timer.start()
         self._buddy_timer.start()
         self._anchor_bubble()
-        self.bubble_widget.show()
+        self.bubble_widget.show_temporary(IDLE_HIDE_MS)
         return ok
 
     def stop(self) -> None:
@@ -132,10 +137,19 @@ class MascotSquadManager(QObject):
         self.ipc_server.close()
         self.bubble_widget.close()
 
+    def set_auto_hide_bubble(self, enabled: bool) -> None:
+        """Enable or disable auto-hiding the status bubble when idle."""
+        self.bubble_widget.set_auto_hide_enabled(enabled)
+        self.pet_window.set_auto_hide_bubble_checked(self.bubble_widget.auto_hide_enabled)
+        self.pet_window.save_preference("auto_hide_bubble", self.bubble_widget.auto_hide_enabled)
+        if self.bubble_widget.isVisible():
+            self._anchor_bubble()
+
     def set_approval_bridge_enabled(self, enabled: bool) -> None:
         """Enable or disable routing tool approvals to the mascot bubble."""
         self.approval_bridge_enabled = bool(enabled)
         self.pet_window.set_approval_bridge_checked(self.approval_bridge_enabled)
+        self.pet_window.save_preference("approval_bridge_enabled", self.approval_bridge_enabled)
         if not self.approval_bridge_enabled:
             pending_id = self.bubble_widget.pending_request_id
             if pending_id:
@@ -150,6 +164,7 @@ class MascotSquadManager(QObject):
         for clone in self.active_clones.values():
             clone.set_click_through(self.click_through)
         self.pet_window.set_click_through_checked(self.click_through)
+        self.pet_window.save_preference("click_through", self.click_through)
 
     def toggle_click_through(self) -> None:
         """Invert the current click-through mode."""
@@ -181,6 +196,7 @@ class MascotSquadManager(QObject):
 
         self.buddy.handle_event(event)
         self._sync_buddy_to_ui()
+        self._update_bubble_visibility_for_event(event)
 
         if (
             event.get("type") == "lifecycle"
@@ -191,6 +207,32 @@ class MascotSquadManager(QObject):
 
         if self.transcript_watcher.transcript_path is not None:
             self.transcript_watcher.poll()
+
+    def _update_bubble_visibility_for_event(self, event: dict[str, Any]) -> None:
+        msg_type = str(event.get("type") or "")
+        if msg_type == "tool_start":
+            self.bubble_widget.show_persistent()
+        elif msg_type == "tool_end":
+            if self.buddy.phase == "error":
+                self.bubble_widget.show_temporary(IDLE_HIDE_MS)
+            else:
+                self.bubble_widget.show_temporary(DONE_HIDE_MS)
+        elif msg_type == "lifecycle":
+            lifecycle_event = str(event.get("event") or "")
+            if lifecycle_event == "PreInvocation":
+                self.bubble_widget.show_persistent()
+            elif lifecycle_event == "Stop":
+                if self.buddy.phase == "error":
+                    self.bubble_widget.show_temporary(IDLE_HIDE_MS)
+                else:
+                    self.bubble_widget.show_temporary(DONE_HIDE_MS)
+            elif lifecycle_event in ("SessionStart", "PostInvocation"):
+                self.bubble_widget.show_temporary(IDLE_HIDE_MS)
+
+    def _on_user_interacted(self, _kind: str) -> None:
+        self.buddy.on_pet()
+        self._sync_buddy_to_ui()
+        self.bubble_widget.show_temporary(IDLE_HIDE_MS)
 
     def _on_approval_requested(self, request_id: str, tool: str, command: str) -> None:
         if not self.approval_bridge_enabled:

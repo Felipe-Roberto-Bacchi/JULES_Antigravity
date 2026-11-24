@@ -27,7 +27,7 @@ PIXEL_SCALES: dict[str, int] = {
     "Médio": 4,
     "Grande": 5,
 }
-DEFAULT_SCALE_NAME = "Médio"
+DEFAULT_SCALE_NAME = "Pequeno"
 
 # Timing & physics constants
 FPS = 60

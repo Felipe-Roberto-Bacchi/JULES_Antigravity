@@ -5,6 +5,8 @@ build/
 dist/
 wheels/
 *.egg-info
+PLANO_MESTRE_JULES.md
+projeto_empacotado.md
 
 # Virtual environments
 .venv

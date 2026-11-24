@@ -266,3 +266,41 @@ def test_buddy_apply_to_controller_and_bubble_anchor_near(qapp: QApplication) ->
     bubble.anchor_near(QRect(400, 300, 152, 152), screen)
     assert screen.contains(bubble.geometry())
     bubble.close()
+
+
+def test_bubble_auto_hide_policy_and_approval_pinning(qapp: QApplication) -> None:
+    import time
+
+    bubble = BubbleWidget()
+    bubble._fade_anim.setDuration(0)
+    try:
+        assert bubble.auto_hide_enabled is True
+
+        # Temporary show hides after timeout
+        bubble.show_temporary(40)
+        assert bubble.isVisible()
+        deadline = time.monotonic() + 1.0
+        while bubble.isVisible() and time.monotonic() < deadline:
+            qapp.processEvents()
+            time.sleep(0.01)
+        assert not bubble.isVisible()
+
+        # Approval pins the bubble so it stays visible even if timer fires
+        bubble.show_approval("req-pin", "run_command", "pytest")
+        assert bubble.isVisible()
+        bubble.schedule_auto_hide(20)
+        qapp.processEvents()
+        time.sleep(0.05)
+        qapp.processEvents()
+        assert bubble.isVisible()
+
+        # Hiding approval unpins and schedules auto-hide
+        bubble.hide_approval()
+        assert bubble._auto_hide_timer.isActive()
+
+        # Disabling auto-hide keeps bubble visible persistently
+        bubble.set_auto_hide_enabled(False)
+        assert bubble.isVisible()
+        assert not bubble._auto_hide_timer.isActive()
+    finally:
+        bubble.close()

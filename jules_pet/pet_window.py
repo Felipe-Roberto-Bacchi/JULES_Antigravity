@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import time
+from pathlib import Path
 from PySide6.QtCore import QPoint, QPointF, QRect, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QAction,
@@ -26,6 +28,7 @@ from jules_pet.config import (
     PIXEL_SCALES,
 )
 from jules_pet.physics import Particle, PetController, PetState
+from jules_pet.settings import PetSettings, load_settings, save_settings
 from jules_pet.sprites import create_tray_icon, get_sprite_pixmap
 
 MENU_STYLESHEET = """
@@ -58,20 +61,46 @@ class JulesPetWindow(QWidget):
     """Frameless, always-on-top, transparent pixel-art Jules octopus pet."""
 
     approval_bridge_toggled = Signal(bool)
+    auto_hide_bubble_toggled = Signal(bool)
     click_through_toggled = Signal(bool)
+    user_interacted = Signal(str)
     moved = Signal()
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        settings_path: Path | None = None,
+        persist_settings: bool | None = None,
+    ) -> None:
         super().__init__()
-        self._always_on_top = True
-        self._click_through = False
+        self._settings_path = settings_path
+        if persist_settings is None:
+            self._persist_settings = not (
+                "PYTEST_CURRENT_TEST" in os.environ and settings_path is None
+            )
+        else:
+            self._persist_settings = bool(persist_settings)
+
+        self._settings: PetSettings = (
+            load_settings(self._settings_path) if self._persist_settings else PetSettings()
+        )
+        self._always_on_top = self._settings.always_on_top
+        self._click_through = self._settings.click_through
         self._apply_window_flags()
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        if self._click_through:
+            self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self.setMouseTracking(True)
 
-        scale = PIXEL_SCALES[DEFAULT_SCALE_NAME]
-        self.controller = PetController(scale=scale)
+        scale = PIXEL_SCALES.get(self._settings.scale_name, PIXEL_SCALES[DEFAULT_SCALE_NAME])
+        self.controller = PetController(
+            scale=scale,
+            follow_mouse=self._settings.follow_mouse,
+            floor_mode=self._settings.floor_mode,
+        )
         self.controller.center_on(self._screen_rect())
+        if self._settings.floor_mode:
+            self.controller.set_floor_mode(True, self._screen_rect())
 
         self.resize(self.controller.window_width, self.controller.window_height)
         self.move(int(self.controller.x), int(self.controller.y))
@@ -130,7 +159,8 @@ class JulesPetWindow(QWidget):
 
         self._act_float = QAction("Flutuar livremente", self, checkable=True)
         self._act_floor = QAction("Andar na barra de tarefas", self, checkable=True)
-        self._act_float.setChecked(True)
+        self._act_float.setChecked(not self._settings.floor_mode)
+        self._act_floor.setChecked(self._settings.floor_mode)
         move_group.addAction(self._act_float)
         move_group.addAction(self._act_floor)
         move_menu.addAction(self._act_float)
@@ -143,13 +173,17 @@ class JulesPetWindow(QWidget):
         size_menu.setStyleSheet(MENU_STYLESHEET)
         size_group = QActionGroup(self)
         size_group.setExclusive(True)
+        self._scale_actions: dict[str, QAction] = {}
         for label, px_scale in PIXEL_SCALES.items():
             act = QAction(label, self, checkable=True)
-            if label == DEFAULT_SCALE_NAME:
+            if label == self._settings.scale_name:
                 act.setChecked(True)
-            act.triggered.connect(lambda _checked=False, s=px_scale: self._on_change_scale(s))
+            act.triggered.connect(
+                lambda _checked=False, s=px_scale, name=label: self._on_change_scale(s, name)
+            )
             size_group.addAction(act)
             size_menu.addAction(act)
+            self._scale_actions[label] = act
 
         self._act_top = QAction("Sempre no topo", self, checkable=True)
         self._act_top.setChecked(self._always_on_top)
@@ -159,12 +193,17 @@ class JulesPetWindow(QWidget):
         self._menu.addSeparator()
 
         self._act_approval_bridge = QAction("Aprovação pelo Pet", self, checkable=True)
-        self._act_approval_bridge.setChecked(False)
+        self._act_approval_bridge.setChecked(self._settings.approval_bridge_enabled)
         self._act_approval_bridge.toggled.connect(self.approval_bridge_toggled.emit)
         self._menu.addAction(self._act_approval_bridge)
 
+        self._act_auto_hide_bubble = QAction("Auto-ocultar balão", self, checkable=True)
+        self._act_auto_hide_bubble.setChecked(self._settings.auto_hide_bubble)
+        self._act_auto_hide_bubble.toggled.connect(self.auto_hide_bubble_toggled.emit)
+        self._menu.addAction(self._act_auto_hide_bubble)
+
         self._act_click_through = QAction("Modo Click-Through (Ctrl+Shift+J)", self, checkable=True)
-        self._act_click_through.setChecked(False)
+        self._act_click_through.setChecked(self._click_through)
         self._act_click_through.toggled.connect(self.click_through_toggled.emit)
         self._menu.addAction(self._act_click_through)
 
@@ -203,22 +242,44 @@ class JulesPetWindow(QWidget):
             self.raise_()
             self.controller.trigger_click_reaction()
 
+    @property
+    def settings(self) -> PetSettings:
+        """Return the current PetSettings instance."""
+        return self._settings
+
+    def save_preference(self, key: str, value: object) -> None:
+        """Update a preference field and persist settings to disk if enabled."""
+        if hasattr(self._settings, key):
+            setattr(self._settings, key, value)
+            if self._persist_settings:
+                save_settings(self._settings, self._settings_path)
+
     def _on_toggle_follow(self, checked: bool) -> None:
         self.controller.follow_mouse = checked
+        self.save_preference("follow_mouse", bool(checked))
 
     def _on_floor_mode(self, enabled: bool) -> None:
         self.controller.set_floor_mode(enabled, self._screen_rect())
+        self.save_preference("floor_mode", bool(enabled))
 
-    def _on_change_scale(self, new_scale: int) -> None:
+    def _on_change_scale(self, new_scale: int, scale_name: str | None = None) -> None:
         self.controller.set_scale(new_scale, self._screen_rect())
         self.resize(self.controller.window_width, self.controller.window_height)
         self.move(int(self.controller.x), int(self.controller.y))
         self.update()
+        if scale_name is None:
+            for name, px_scale in PIXEL_SCALES.items():
+                if px_scale == new_scale:
+                    scale_name = name
+                    break
+        if scale_name is not None:
+            self.save_preference("scale_name", scale_name)
 
     def _on_toggle_top(self, checked: bool) -> None:
         self._always_on_top = checked
         self._apply_window_flags()
         self.show()
+        self.save_preference("always_on_top", bool(checked))
 
     def _on_toggle_sleep(self) -> None:
         self.controller.toggle_sleep()
@@ -331,6 +392,12 @@ class JulesPetWindow(QWidget):
         self._act_approval_bridge.setChecked(bool(enabled))
         self._act_approval_bridge.blockSignals(False)
 
+    def set_auto_hide_bubble_checked(self, enabled: bool) -> None:
+        """Sync the menu check state for auto-hide bubble without re-emitting toggled."""
+        self._act_auto_hide_bubble.blockSignals(True)
+        self._act_auto_hide_bubble.setChecked(bool(enabled))
+        self._act_auto_hide_bubble.blockSignals(False)
+
     def moveEvent(self, event: QMoveEvent) -> None:  # noqa: N802
         super().moveEvent(event)
         self.moved.emit()
@@ -378,6 +445,7 @@ class JulesPetWindow(QWidget):
             if self._pet_rub_accum >= 70.0:
                 self._pet_rub_accum = 0.0
                 self.controller.trigger_pet_reaction()
+                self.user_interacted.emit("pet")
         self._last_hover_x = lx
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
@@ -388,9 +456,11 @@ class JulesPetWindow(QWidget):
                 self.controller.end_drag(self._throw_vx, self._throw_vy)
             else:
                 self.controller.trigger_click_reaction()
+                self.user_interacted.emit("click")
             event.accept()
 
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
             self.controller.trigger_double_click_reaction()
+            self.user_interacted.emit("double_click")
             event.accept()

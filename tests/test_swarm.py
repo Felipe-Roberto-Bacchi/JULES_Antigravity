@@ -346,3 +346,52 @@ def test_approval_bridge_default_asks_and_enabled_forwards_bubble_decision(qapp:
     finally:
         manager.stop()
         pet.close()
+
+
+def test_bubble_auto_hide_on_demand_and_tray_menu_toggle(qapp: QApplication) -> None:
+    from jules_pet.bubble_widget import DONE_HIDE_MS, IDLE_HIDE_MS
+
+    manager, pet, bubble, _ipc, _watcher = _make_manager()
+    manager.start()
+    try:
+        # Tray/context menu action exists and is checked by default
+        assert pet._act_auto_hide_bubble.isCheckable()
+        assert pet._act_auto_hide_bubble.isChecked() is True
+        assert bubble.auto_hide_enabled is True
+        assert bubble._auto_hide_timer.isActive()
+        assert bubble._auto_hide_timer.interval() == IDLE_HIDE_MS
+
+        # tool_start keeps bubble visible persistently (stops auto-hide timer)
+        manager.on_ipc_event({"type": "tool_start", "tool": "edit_file", "category": "edit_write"})
+        assert bubble.isVisible()
+        assert not bubble._auto_hide_timer.isActive()
+
+        # tool_end (ok) and Stop (done) schedule 2.5s auto-hide
+        manager.on_ipc_event({"type": "tool_end", "tool": "edit_file", "ok": True})
+        assert bubble._auto_hide_timer.isActive()
+        assert bubble._auto_hide_timer.interval() == DONE_HIDE_MS
+
+        manager.on_ipc_event({"type": "lifecycle", "event": "Stop", "fully_idle": True})
+        assert bubble._auto_hide_timer.isActive()
+        assert bubble._auto_hide_timer.interval() == DONE_HIDE_MS
+
+        # Error shows bubble temporarily (4s)
+        manager.on_ipc_event({"type": "tool_end", "tool": "run_command", "ok": False, "error": "fail"})
+        assert bubble.isVisible()
+        assert bubble._auto_hide_timer.isActive()
+        assert bubble._auto_hide_timer.interval() == IDLE_HIDE_MS
+
+        # User click/petting shows bubble temporarily
+        bubble.hide()
+        pet.user_interacted.emit("pet")
+        assert bubble.isVisible()
+        assert bubble._auto_hide_timer.isActive()
+
+        # Unchecking tray action keeps bubble always visible
+        pet._act_auto_hide_bubble.setChecked(False)
+        assert bubble.auto_hide_enabled is False
+        assert not bubble._auto_hide_timer.isActive()
+        assert bubble.isVisible()
+    finally:
+        manager.stop()
+        pet.close()

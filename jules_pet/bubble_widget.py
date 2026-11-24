@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QRect, Qt, Signal
+from PySide6.QtCore import QPropertyAnimation, QRect, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -11,6 +11,10 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+IDLE_HIDE_MS = 4000
+DONE_HIDE_MS = 2500
+FADE_DURATION_MS = 220
 
 BUBBLE_STYLESHEET = """
 QFrame#bubbleFrame {
@@ -94,6 +98,16 @@ class BubbleWidget(QWidget):
         self._always_on_top = always_on_top
         self._overflow_count: int = 0
         self._pending_request_id: str | None = None
+        self._auto_hide_enabled: bool = True
+        self._pinned: bool = False
+
+        self._auto_hide_timer = QTimer(self)
+        self._auto_hide_timer.setSingleShot(True)
+        self._auto_hide_timer.timeout.connect(self._on_auto_hide_timeout)
+
+        self._fade_anim = QPropertyAnimation(self, b"windowOpacity", self)
+        self._fade_anim.setDuration(FADE_DURATION_MS)
+        self._fade_anim.finished.connect(self._on_fade_finished)
 
         self._apply_window_flags()
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
@@ -184,6 +198,62 @@ class BubbleWidget(QWidget):
     def pending_request_id(self) -> str | None:
         return self._pending_request_id
 
+    @property
+    def auto_hide_enabled(self) -> bool:
+        return self._auto_hide_enabled
+
+    def set_auto_hide_enabled(self, enabled: bool) -> None:
+        """Enable or disable automatic hiding of the bubble when idle."""
+        self._auto_hide_enabled = bool(enabled)
+        if not self._auto_hide_enabled:
+            self.cancel_auto_hide()
+            self.show()
+        elif not self._pinned and self.isVisible():
+            self.schedule_auto_hide(IDLE_HIDE_MS)
+
+    def show_persistent(self) -> None:
+        """Show the bubble without scheduling an auto-hide timeout."""
+        self.cancel_auto_hide()
+        self.show()
+
+    def show_temporary(self, duration_ms: int = IDLE_HIDE_MS) -> None:
+        """Show the bubble and schedule auto-hide after duration_ms if enabled."""
+        self._fade_anim.stop()
+        self.setWindowOpacity(1.0)
+        self.show()
+        self.schedule_auto_hide(duration_ms)
+
+    def schedule_auto_hide(self, duration_ms: int = IDLE_HIDE_MS) -> None:
+        """Schedule auto-hide after duration_ms unless disabled or pinned."""
+        if not self._auto_hide_enabled or self._pinned:
+            return
+        self._auto_hide_timer.start(max(1, int(duration_ms)))
+
+    def cancel_auto_hide(self) -> None:
+        """Cancel any pending auto-hide timer or running fade-out animation."""
+        self._auto_hide_timer.stop()
+        self._fade_anim.stop()
+        self.setWindowOpacity(1.0)
+
+    def _on_auto_hide_timeout(self) -> None:
+        if not self._auto_hide_enabled or self._pinned:
+            return
+        if not self.isVisible():
+            return
+        if self._fade_anim.duration() > 0:
+            self._fade_anim.stop()
+            self._fade_anim.setStartValue(float(self.windowOpacity()))
+            self._fade_anim.setEndValue(0.0)
+            self._fade_anim.start()
+        else:
+            self.hide()
+            self.setWindowOpacity(1.0)
+
+    def _on_fade_finished(self) -> None:
+        if self.windowOpacity() <= 0.01 and self._auto_hide_enabled and not self._pinned:
+            self.hide()
+            self.setWindowOpacity(1.0)
+
     def set_status(self, text: str) -> None:
         """Update the bubble status text and refit the bubble bounds."""
         self.status_label.setText(text)
@@ -202,6 +272,8 @@ class BubbleWidget(QWidget):
 
     def show_approval(self, request_id: str, tool: str, command: str) -> None:
         """Display the interactive `[Permitir]` / `[Bloquear]` approval prompt."""
+        self._pinned = True
+        self.cancel_auto_hide()
         self._pending_request_id = request_id
         preview = command.strip() or tool.strip()
         if len(preview) > 120:
@@ -210,13 +282,17 @@ class BubbleWidget(QWidget):
         self.command_label.setText(label_text)
         self.approval_bar.show()
         self.adjustSize()
+        self.show()
 
     def hide_approval(self) -> None:
         """Hide the approval bar and clear any pending request ID."""
+        self._pinned = False
         self._pending_request_id = None
         self.command_label.clear()
         self.approval_bar.hide()
         self.adjustSize()
+        if self._auto_hide_enabled:
+            self.schedule_auto_hide(DONE_HIDE_MS)
 
     def _decide(self, decision: str) -> None:
         request_id = self._pending_request_id
