@@ -1,0 +1,6 @@
+{
+  "name": "jules-pet-bridge",
+  "displayName": "Jules Pet Bridge",
+  "description": "Streams Antigravity lifecycle, tool execution, and optional command approval events to the Jules Desktop Pet over loopback TCP.",
+  "version": "0.1.0"
+}

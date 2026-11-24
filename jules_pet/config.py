@@ -18,8 +18,8 @@ HEART_PINK = "#FB7185"
 ZZZ_LAVENDER = "#C4B5FD"
 
 # Logical sprite grid dimensions
-GRID_WIDTH = 18
-GRID_HEIGHT = 20
+GRID_WIDTH = 24
+GRID_HEIGHT = 22
 
 # Scale presets (logical pixel -> screen pixels)
 PIXEL_SCALES: dict[str, int] = {
