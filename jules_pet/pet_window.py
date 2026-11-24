@@ -16,13 +16,17 @@ from PySide6.QtGui import (
     QMoveEvent,
     QPainter,
     QPaintEvent,
+    QPixmap,
     QResizeEvent,
 )
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon, QWidget
 
+from jules_pet.accessories_manager import AccessoriesManager
 from jules_pet.config import (
     DEFAULT_SCALE_NAME,
     FRAME_MS,
+    GRID_HEIGHT,
+    GRID_WIDTH,
     PADDING_X,
     PADDING_Y,
     PIXEL_SCALES,
@@ -63,6 +67,11 @@ class JulesPetWindow(QWidget):
     approval_bridge_toggled = Signal(bool)
     auto_hide_bubble_toggled = Signal(bool)
     click_through_toggled = Signal(bool)
+    accessory_selected = Signal(str, str)
+    perch_toggled = Signal(bool)
+    sounds_toggled = Signal(bool)
+    coffee_requested = Signal()
+    stats_requested = Signal()
     user_interacted = Signal(str)
     moved = Signal()
 
@@ -71,6 +80,7 @@ class JulesPetWindow(QWidget):
         *,
         settings_path: Path | None = None,
         persist_settings: bool | None = None,
+        accessories_manager: AccessoriesManager | None = None,
     ) -> None:
         super().__init__()
         self._settings_path = settings_path
@@ -84,6 +94,10 @@ class JulesPetWindow(QWidget):
         self._settings: PetSettings = (
             load_settings(self._settings_path) if self._persist_settings else PetSettings()
         )
+        self._accessories_manager = accessories_manager or AccessoriesManager()
+        self._active_accessory_pixmap: QPixmap | None = None
+        self._active_accessory_ox: int = 0
+        self._active_accessory_oy: int = 0
         self._always_on_top = self._settings.always_on_top
         self._click_through = self._settings.click_through
         self._apply_window_flags()
@@ -189,6 +203,35 @@ class JulesPetWindow(QWidget):
         self._act_top.setChecked(self._always_on_top)
         self._act_top.toggled.connect(self._on_toggle_top)
         self._menu.addAction(self._act_top)
+
+        # Accessories submenu
+        self._accessories_menu = self._menu.addMenu("Acessórios")
+        self._accessories_menu.setStyleSheet(MENU_STYLESHEET)
+        self._accessories_group = QActionGroup(self)
+        self._accessories_group.setExclusive(True)
+        self._custom_accessory_actions: dict[str, QAction] = {}
+        self._populate_accessories_menu()
+        self._accessories_menu.aboutToShow.connect(self._populate_accessories_menu)
+
+        self._act_perch = QAction("Empoleirar na janela de código", self, checkable=True)
+        self._act_perch.setChecked(self._settings.perch_enabled)
+        self._act_perch.toggled.connect(self.perch_toggled.emit)
+        self._menu.addAction(self._act_perch)
+
+        self._act_sounds = QAction("Sons 8-bit", self, checkable=True)
+        self._act_sounds.setChecked(self._settings.sounds_enabled)
+        self._act_sounds.toggled.connect(self.sounds_toggled.emit)
+        self._menu.addAction(self._act_sounds)
+
+        self._menu.addSeparator()
+
+        self._act_coffee = QAction("Oferecer Café", self)
+        self._act_coffee.triggered.connect(self.coffee_requested.emit)
+        self._menu.addAction(self._act_coffee)
+
+        self._act_stats = QAction("Estatísticas da Sessão", self)
+        self._act_stats.triggered.connect(self.stats_requested.emit)
+        self._menu.addAction(self._act_stats)
 
         self._menu.addSeparator()
 
@@ -326,8 +369,32 @@ class JulesPetWindow(QWidget):
         bob_y = self.controller.bob_offset_y()
         painter.drawPixmap(PADDING_X, PADDING_Y + bob_y, pixmap)
 
+        if self._active_accessory_pixmap is not None and not self._active_accessory_pixmap.isNull():
+            painter.drawPixmap(
+                PADDING_X + self._active_accessory_ox,
+                PADDING_Y + bob_y + self._active_accessory_oy,
+                self._active_accessory_pixmap,
+            )
+
+        if self.controller.state == PetState.EXHAUSTED:
+            self._draw_micro_laptop(painter, bob_y)
+
         for particle in self.controller.particles:
             self._draw_particle(painter, particle)
+
+    def _draw_micro_laptop(self, painter: QPainter, bob_y: int) -> None:
+        s = max(2, self.controller.scale)
+        lx = PADDING_X + ((GRID_WIDTH - 10) // 2) * s
+        ly = PADDING_Y + bob_y + (GRID_HEIGHT - 6) * s
+        # Lid / bezel
+        painter.fillRect(lx + s, ly, 8 * s, 4 * s, QColor("#140B29"))
+        # Glowing cyan/indigo screen
+        painter.fillRect(lx + 2 * s, ly + s, 6 * s, 2 * s, QColor("#38BDF8"))
+        # Tiny code line highlights on screen
+        painter.fillRect(lx + 3 * s, ly + s, 3 * s, max(1, s // 2), QColor("#E0F2FE"))
+        # Keyboard base
+        painter.fillRect(lx, ly + 4 * s, 10 * s, 2 * s, QColor("#475569"))
+        painter.fillRect(lx + s, ly + 4 * s, 8 * s, s, QColor("#94A3B8"))
 
     def _draw_particle(self, painter: QPainter, p: Particle) -> None:
         alpha = max(0.0, min(1.0, p.life / p.max_life))
@@ -362,6 +429,12 @@ class JulesPetWindow(QWidget):
             painter.fillRect(px - 2 * s, py, s, s, color)
             painter.fillRect(px + s, py - 2 * s, s, s, color)
             painter.fillRect(px + s, py + s, s, s, color)
+        elif p.kind == "steam":
+            # Rising pixel-art steam curl
+            painter.fillRect(px, py - s * 2, s, s, color)
+            painter.fillRect(px + s, py - s, s, s, color)
+            painter.fillRect(px, py, s, s, color)
+            painter.fillRect(px - s, py + s, s, s, color)
 
     def pet_rect(self) -> QRect:
         """Return the pet window bounds in screen coordinates."""
@@ -398,6 +471,90 @@ class JulesPetWindow(QWidget):
         self._act_auto_hide_bubble.setChecked(bool(enabled))
         self._act_auto_hide_bubble.blockSignals(False)
 
+    def _populate_accessories_menu(self) -> None:
+        """Rebuild the dynamic 'Acessórios' submenu from AccessoriesManager."""
+        for action in list(self._accessories_group.actions()):
+            self._accessories_group.removeAction(action)
+        self._accessories_menu.clear()
+        self._custom_accessory_actions.clear()
+
+        self._act_acc_auto = QAction("Automático por Ferramenta", self, checkable=True)
+        self._act_acc_auto.triggered.connect(lambda: self.accessory_selected.emit("auto", ""))
+        self._accessories_group.addAction(self._act_acc_auto)
+        self._accessories_menu.addAction(self._act_acc_auto)
+
+        self._act_acc_none = QAction("Nenhum", self, checkable=True)
+        self._act_acc_none.triggered.connect(lambda: self.accessory_selected.emit("none", ""))
+        self._accessories_group.addAction(self._act_acc_none)
+        self._accessories_menu.addAction(self._act_acc_none)
+
+        custom_specs = self._accessories_manager.list_custom()
+        if custom_specs:
+            self._accessories_menu.addSeparator()
+            for spec in custom_specs:
+                act = QAction(spec.name, self, checkable=True)
+                act.triggered.connect(
+                    lambda _checked=False, cid=spec.id: self.accessory_selected.emit("custom", cid)
+                )
+                self._accessories_group.addAction(act)
+                self._accessories_menu.addAction(act)
+                self._custom_accessory_actions[spec.id] = act
+
+        self.set_accessory_selection(
+            self._settings.accessory_mode,
+            self._settings.custom_accessory_id,
+        )
+
+    def set_accessories_manager(self, manager: AccessoriesManager) -> None:
+        """Attach an AccessoriesManager instance and refresh the accessories submenu."""
+        self._accessories_manager = manager
+        self._populate_accessories_menu()
+
+    def set_accessory_selection(self, mode: str, custom_id: str = "") -> None:
+        """Sync the menu check state for the active accessory without re-emitting signals."""
+        normalized_mode = (mode or "auto").strip().lower()
+        target: QAction | None = None
+        if normalized_mode in {"none", "off", ""}:
+            target = self._act_acc_none
+        elif normalized_mode == "custom":
+            target = self._custom_accessory_actions.get((custom_id or "").strip())
+        elif normalized_mode == "auto":
+            target = self._act_acc_auto
+
+        for act in self._accessories_group.actions():
+            act.blockSignals(True)
+            act.setChecked(act is target)
+            act.blockSignals(False)
+
+    def set_perch_checked(self, enabled: bool) -> None:
+        """Sync the menu check state for perching without re-emitting toggled."""
+        self._act_perch.blockSignals(True)
+        self._act_perch.setChecked(bool(enabled))
+        self._act_perch.blockSignals(False)
+
+    def set_sounds_checked(self, enabled: bool) -> None:
+        """Sync the menu check state for 8-bit sounds without re-emitting toggled."""
+        self._act_sounds.blockSignals(True)
+        self._act_sounds.setChecked(bool(enabled))
+        self._act_sounds.blockSignals(False)
+
+    def set_active_accessory(
+        self,
+        pixmap: QPixmap | None,
+        ox: int = 0,
+        oy: int = 0,
+    ) -> None:
+        """Set or clear the pixel-art accessory overlay rendered atop Jules."""
+        if pixmap is None or pixmap.isNull():
+            self._active_accessory_pixmap = None
+            self._active_accessory_ox = 0
+            self._active_accessory_oy = 0
+        else:
+            self._active_accessory_pixmap = pixmap
+            self._active_accessory_ox = int(ox)
+            self._active_accessory_oy = int(oy)
+        self.update()
+
     def moveEvent(self, event: QMoveEvent) -> None:  # noqa: N802
         super().moveEvent(event)
         self.moved.emit()
@@ -418,6 +575,9 @@ class JulesPetWindow(QWidget):
             event.accept()
         elif event.button() == Qt.MouseButton.RightButton:
             self._menu.popup(event.globalPosition().toPoint())
+            event.accept()
+        elif event.button() == Qt.MouseButton.MiddleButton:
+            self.coffee_requested.emit()
             event.accept()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
@@ -463,4 +623,7 @@ class JulesPetWindow(QWidget):
         if event.button() == Qt.MouseButton.LeftButton:
             self.controller.trigger_double_click_reaction()
             self.user_interacted.emit("double_click")
+            event.accept()
+        elif event.button() == Qt.MouseButton.RightButton:
+            self.stats_requested.emit()
             event.accept()

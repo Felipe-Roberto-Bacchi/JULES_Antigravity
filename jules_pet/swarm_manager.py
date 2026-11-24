@@ -8,15 +8,30 @@ from PySide6.QtCore import QObject, Qt, QTimer
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import QWidget
 
+from jules_pet.accessories_manager import AccessoriesManager, render_accessory_pixmap
 from jules_pet.bubble_widget import BubbleWidget, DONE_HIDE_MS, IDLE_HIDE_MS
 from jules_pet.buddy import BuddySessionModel
+from jules_pet.coffee_window import CoffeeCupWindow
+from jules_pet.ink_splat_window import InkSplatManager
 from jules_pet.ipc_protocol import DEFAULT_IPC_HOST, DEFAULT_IPC_PORT
 from jules_pet.ipc_server import JulesIpcServer
+from jules_pet.perch_controller import PerchController
 from jules_pet.pet_window import JulesPetWindow
+from jules_pet.sound_effects import RetroSoundEngine, SoundEffect
+from jules_pet.stats_window import SessionStats, StatsCardWindow
 from jules_pet.subagent_window import JulesSubagentWindow
 from jules_pet.transcript_watcher import TranscriptWatcher
 
 MAX_VISIBLE_CLONES = 5
+
+_MOOD_LABELS: dict[str, str] = {
+    "idle": "De boas",
+    "happy": "Feliz",
+    "focused": "Focado",
+    "tired": "Exausto",
+    "sweating": "Suando frio",
+    "shocked": "Em choque",
+}
 
 _CLONE_HUE_SHIFTS: tuple[float, ...] = (
     0.14,
@@ -56,6 +71,10 @@ class MascotSquadManager(QObject):
         ipc_host: str = DEFAULT_IPC_HOST,
         ipc_port: int = DEFAULT_IPC_PORT,
         auto_start: bool = False,
+        accessories_manager: AccessoriesManager | None = None,
+        perch_controller: PerchController | None = None,
+        sound_engine: RetroSoundEngine | None = None,
+        ink_splat_manager: InkSplatManager | None = None,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
@@ -71,6 +90,44 @@ class MascotSquadManager(QObject):
 
         self.approval_bridge_enabled: bool = self.pet_window.settings.approval_bridge_enabled
         self.click_through: bool = self.pet_window.settings.click_through
+        self.accessory_mode: str = self.pet_window.settings.accessory_mode
+        self.custom_accessory_id: str = self.pet_window.settings.custom_accessory_id
+        self.perch_enabled: bool = self.pet_window.settings.perch_enabled
+        self.sounds_enabled: bool = self.pet_window.settings.sounds_enabled
+        self.active_accessory_id: str | None = None
+        self._last_rendered_accessory_key: tuple[str, int, bool] | None = None
+
+        self.accessories_manager = accessories_manager or self.pet_window._accessories_manager
+        self.pet_window.set_accessories_manager(self.accessories_manager)
+        self.pet_window.set_accessory_selection(self.accessory_mode, self.custom_accessory_id)
+
+        self.perch_controller = perch_controller or PerchController(
+            enabled=self.perch_enabled,
+            parent=self,
+        )
+        if perch_controller is not None:
+            if self.perch_enabled:
+                self.perch_controller.set_enabled(True)
+            elif self.perch_controller.enabled:
+                self.perch_enabled = True
+                self.pet_window.set_perch_checked(True)
+
+        self.sound_engine = sound_engine or RetroSoundEngine(enabled=self.sounds_enabled)
+        if sound_engine is not None:
+            if self.sounds_enabled:
+                self.sound_engine.set_enabled(True)
+            elif self.sound_engine.enabled:
+                self.sounds_enabled = True
+                self.pet_window.set_sounds_checked(True)
+
+        self.ink_splat_manager = ink_splat_manager or InkSplatManager(
+            scale=self.pet_window.controller.scale,
+            always_on_top=self.pet_window._always_on_top,
+            parent=self,
+        )
+        self.coffee_window: CoffeeCupWindow | None = None
+        self.stats_window: StatsCardWindow | None = None
+
         self.bubble_widget.set_auto_hide_enabled(self.pet_window.settings.auto_hide_bubble)
         if self.click_through:
             _apply_click_through(self.bubble_widget, True)
@@ -88,8 +145,17 @@ class MascotSquadManager(QObject):
         self.pet_window.approval_bridge_toggled.connect(self.set_approval_bridge_enabled)
         self.pet_window.auto_hide_bubble_toggled.connect(self.set_auto_hide_bubble)
         self.pet_window.click_through_toggled.connect(self.set_click_through)
+        self.pet_window.accessory_selected.connect(self.set_accessory)
+        self.pet_window.perch_toggled.connect(self.set_perch_enabled)
+        self.pet_window.sounds_toggled.connect(self.set_sounds_enabled)
+        self.pet_window.coffee_requested.connect(self.offer_coffee)
+        self.pet_window.stats_requested.connect(self.show_stats)
         self.pet_window.user_interacted.connect(self._on_user_interacted)
         self.pet_window.moved.connect(self._on_pet_moved)
+
+        # Wire perch & buddy signals
+        self.perch_controller.perch_target_changed.connect(self._on_perch_target_changed)
+        self.buddy.ink_shock_requested.connect(self._on_ink_shock_requested)
 
         # Wire bubble approval decisions back to IPC server
         self.bubble_widget.approval_decided.connect(self._on_approval_decided)
@@ -130,9 +196,19 @@ class MascotSquadManager(QObject):
         return ok
 
     def stop(self) -> None:
-        """Stop timers, close IPC server, clean up all clones, and hide the bubble."""
+        """Stop timers, close IPC server, clean up all clones/overlays, and hide the bubble."""
         self._transcript_timer.stop()
         self._buddy_timer.stop()
+        self.perch_controller._timer.stop()
+        self.ink_splat_manager.clear_all()
+        if self.coffee_window is not None:
+            self.coffee_window.close()
+            self.coffee_window.deleteLater()
+            self.coffee_window = None
+        if self.stats_window is not None:
+            self.stats_window.close()
+            self.stats_window.deleteLater()
+            self.stats_window = None
         self.cleanup_all_clones()
         self.ipc_server.close()
         self.bubble_widget.close()
@@ -170,6 +246,144 @@ class MascotSquadManager(QObject):
         """Invert the current click-through mode."""
         self.set_click_through(not self.click_through)
 
+    def set_accessory(self, mode: str, custom_id: str = "") -> None:
+        """Select the active accessory mode/custom ID and persist it."""
+        self.accessory_mode = (mode or "auto").strip() or "auto"
+        self.custom_accessory_id = (custom_id or "").strip()
+        self.pet_window.set_accessory_selection(self.accessory_mode, self.custom_accessory_id)
+        self.pet_window.save_preference("accessory_mode", self.accessory_mode)
+        self.pet_window.save_preference("custom_accessory_id", self.custom_accessory_id)
+        self._sync_accessory()
+
+    def set_perch_enabled(self, enabled: bool) -> None:
+        """Enable or disable perching on active IDE/terminal windows."""
+        self.perch_enabled = bool(enabled)
+        self.perch_controller.set_enabled(self.perch_enabled)
+        self.pet_window.set_perch_checked(self.perch_enabled)
+        self.pet_window.save_preference("perch_enabled", self.perch_enabled)
+        if self.perch_enabled:
+            self.perch_controller.poll()
+
+    def set_sounds_enabled(self, enabled: bool) -> None:
+        """Enable or disable procedural 8-bit sound effects."""
+        self.sounds_enabled = bool(enabled)
+        self.sound_engine.set_enabled(self.sounds_enabled)
+        self.pet_window.set_sounds_checked(self.sounds_enabled)
+        self.pet_window.save_preference("sounds_enabled", self.sounds_enabled)
+
+    def offer_coffee(self) -> CoffeeCupWindow:
+        """Spawn a steaming coffee cup and steer Jules over for a coffee break."""
+        if self.coffee_window is not None:
+            self.coffee_window.close()
+            self.coffee_window.deleteLater()
+            self.coffee_window = None
+
+        cup_scale = max(2, self.pet_window.controller.scale - 1)
+        cup = CoffeeCupWindow(scale=cup_scale)
+        screen = self.pet_window.screen_rect()
+        pet_center = self.pet_window.controller.sprite_center
+
+        offset_x = -110 if pet_center.x() > screen.center().x() else 110
+        raw_x = int(round(pet_center.x() + offset_x - cup.width() / 2.0))
+        raw_y = int(round(pet_center.y() - cup.height() / 2.0 + 10.0))
+        max_x = max(screen.left(), screen.left() + screen.width() - cup.width())
+        max_y = max(screen.top(), screen.top() + screen.height() - cup.height())
+        cup.move(
+            max(screen.left(), min(raw_x, max_x)),
+            max(screen.top(), min(raw_y, max_y)),
+        )
+        cup.show()
+        self.coffee_window = cup
+
+        def _on_drink_finished() -> None:
+            if self.coffee_window is cup:
+                self.coffee_window = None
+            cup.close()
+            cup.deleteLater()
+
+        def _on_arrived() -> None:
+            self.buddy.take_coffee_break()
+            self._sync_buddy_to_ui()
+            self.bubble_widget.show_temporary(DONE_HIDE_MS)
+            cup.start_drinking()
+
+        cup.drink_finished.connect(_on_drink_finished)
+        self.pet_window.controller.start_coffee_break(cup.cup_center(), on_arrived=_on_arrived)
+        return cup
+
+    def current_session_stats(self) -> SessionStats:
+        """Snapshot the buddy telemetry into a SessionStats dataclass."""
+        return SessionStats(
+            total_tokens=self.buddy.total_tokens,
+            total_subagents=self.buddy.total_subagents,
+            commands_succeeded=self.buddy.commands_succeeded,
+            commands_total=self.buddy.commands_total,
+            pet_count=self.buddy.pet_count,
+            energy=self.buddy.energy,
+            mood_score=self.buddy.mood_score,
+            mood_label=_MOOD_LABELS.get(self.buddy.mood, "De boas"),
+            session_duration_seconds=self.buddy.session_duration_seconds,
+        )
+
+    def show_stats(self) -> StatsCardWindow:
+        """Open or refresh the retro RPG SessionStats HUD card."""
+        stats = self.current_session_stats()
+        if self.stats_window is None:
+            self.stats_window = StatsCardWindow(stats=stats)
+        else:
+            self.stats_window.update_stats(stats)
+        self.stats_window.show()
+        self.stats_window.raise_()
+        return self.stats_window
+
+    def _on_perch_target_changed(self, rect: object) -> None:
+        self.pet_window.controller.set_perch_rect(
+            rect if hasattr(rect, "top") else None,
+            self.pet_window.screen_rect(),
+        )
+        self.pet_window.move(
+            int(round(self.pet_window.controller.x)),
+            int(round(self.pet_window.controller.y)),
+        )
+
+    def _on_ink_shock_requested(self) -> None:
+        self.ink_splat_manager.scale = self.pet_window.controller.scale
+        self.ink_splat_manager.always_on_top = self.pet_window._always_on_top
+        self.ink_splat_manager.spawn_splats(
+            self.pet_window.controller.sprite_center,
+            self.pet_window.screen_rect(),
+            count=3,
+        )
+        self.sound_engine.play(SoundEffect.SQUIRT)
+
+    def _sync_accessory(self) -> None:
+        swarm_count = len(self.active_clones) + self.overflow_count
+        spec = self.accessories_manager.resolve_active_accessory(
+            mode=self.accessory_mode,
+            custom_id=self.custom_accessory_id,
+            category=self.buddy.active_category,
+            swarm_count=swarm_count,
+        )
+        if spec is None:
+            self.active_accessory_id = None
+            if self._last_rendered_accessory_key is not None:
+                self._last_rendered_accessory_key = None
+                self.pet_window.set_active_accessory(None, 0, 0)
+            return
+
+        self.active_accessory_id = spec.id
+        ctrl = self.pet_window.controller
+        render_key = (spec.id, ctrl.scale, ctrl.facing_left)
+        if render_key == self._last_rendered_accessory_key:
+            return
+        self._last_rendered_accessory_key = render_key
+        pix, ox, oy = render_accessory_pixmap(
+            spec,
+            scale=ctrl.scale,
+            flip_x=ctrl.facing_left,
+        )
+        self.pet_window.set_active_accessory(pix, ox, oy)
+
     def cleanup_all_clones(self) -> None:
         """Immediately remove all subagent clone windows and reset overflow count."""
         self._cleaning_up = True
@@ -182,6 +396,7 @@ class MascotSquadManager(QObject):
                 clone.deleteLater()
             self.bubble_widget.set_swarm_overflow(0)
             self._anchor_bubble()
+            self._sync_accessory()
         finally:
             self._cleaning_up = False
 
@@ -204,6 +419,8 @@ class MascotSquadManager(QObject):
             and bool(event.get("fully_idle", False))
         ):
             self.cleanup_all_clones()
+            if not str(event.get("error") or "").strip():
+                self.sound_engine.play(SoundEffect.LEVEL_UP)
 
         if self.transcript_watcher.transcript_path is not None:
             self.transcript_watcher.poll()
@@ -231,6 +448,7 @@ class MascotSquadManager(QObject):
 
     def _on_user_interacted(self, _kind: str) -> None:
         self.buddy.on_pet()
+        self.sound_engine.play(SoundEffect.BLIP)
         self._sync_buddy_to_ui()
         self.bubble_widget.show_temporary(IDLE_HIDE_MS)
 
@@ -273,6 +491,7 @@ class MascotSquadManager(QObject):
         if kind == "spawn":
             if subagent_id in self.active_clones or subagent_id in self._overflow_subagents:
                 return
+            self.buddy.record_subagent_spawn()
             self.pet_window.controller.set_annoyed()
             if len(self.active_clones) < self.MAX_VISIBLE_CLONES:
                 self._spawn_visible_clone(subagent_id, role, type_name)
@@ -280,14 +499,17 @@ class MascotSquadManager(QObject):
                 self._overflow_subagents[subagent_id] = (role, type_name)
             self.bubble_widget.set_swarm_overflow(self.overflow_count)
             self._anchor_bubble()
+            self._sync_accessory()
             return
 
         if kind == "done":
             self.pet_window.controller.trigger_high_five()
+            self.sound_engine.play(SoundEffect.POWER_UP)
             if subagent_id in self._overflow_subagents:
                 self._overflow_subagents.pop(subagent_id, None)
                 self.bubble_widget.set_swarm_overflow(self.overflow_count)
                 self._anchor_bubble()
+                self._sync_accessory()
                 return
 
             clone = self.active_clones.get(subagent_id)
@@ -340,6 +562,7 @@ class MascotSquadManager(QObject):
 
         self.bubble_widget.set_swarm_overflow(self.overflow_count)
         self._anchor_bubble()
+        self._sync_accessory()
 
     def _on_pet_moved(self) -> None:
         self._anchor_bubble()
@@ -359,6 +582,9 @@ class MascotSquadManager(QObject):
             ctrl.set_context_pressure(self.buddy.context_pressure)
         self.bubble_widget.set_status(self.buddy.status_verb)
         self._anchor_bubble()
+        self._sync_accessory()
+        if self.stats_window is not None and self.stats_window.isVisible():
+            self.stats_window.update_stats(self.current_session_stats())
 
     def _anchor_bubble(self) -> None:
         self.bubble_widget.anchor_near(
